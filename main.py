@@ -1,5 +1,4 @@
 from playwright.sync_api import sync_playwright
-import json
 
 def decimal_to_dms(lat, lon):
     def convert(value, pos, neg):
