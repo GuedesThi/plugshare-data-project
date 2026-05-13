@@ -1,7 +1,17 @@
-from playwright.sync_api import sync_playwright
-import math
 import time
+import math
+import json
+import os
+import gc
 import pandas as pd
+from playwright.sync_api import sync_playwright
+
+# --- CONFIGURAÇÃO CAPITAL RJ ---
+LAT_NORTE, LAT_SUL = -22.85, -23.05
+LON_OESTE, LON_LESTE = -43.55, -43.15
+DIVISOES_LAT, DIVISOES_LON = 8, 12
+ZOOM_LEVEL = 15
+CHECKPOINT_FILE = "checkpoint_capital_rj.json"
 
 CONNECTOR_TYPES = {
     1: "J-1772", 2: "Tesla", 3: "NEMA 5-15", 4: "CHAdeMO",
@@ -9,166 +19,151 @@ CONNECTOR_TYPES = {
     20: "CCS2", 49: "Tipo 2"
 }
 
-RJ_BOUNDS = {
-    "lat_min": -23.08, "lat_max": -22.74,
-    "lon_min": -43.79, "lon_max": -43.10
-}
+def decimal_para_dms(lat, lon):
+    def converter(valor, pos, neg):
+        direcao = pos if valor >= 0 else neg
+        valor = abs(valor)
+        graus = int(valor)
+        minutos = int((valor - graus) * 60)
+        segundos = ((valor - graus) * 60 - minutos) * 60
+        return f'{graus}º{minutos}\'{segundos:.2f}"{direcao}'
+    return converter(lat, 'N', 'S'), converter(lon, 'E', 'W')
 
-COORDENADAS_ALVO = [
-    {"lat": -22.9068, "lon": -43.1729}, # 1. Centro / Porto Maravilha
-    {"lat": -22.9519, "lon": -43.1850}, # 2. Botafogo / Flamengo
-    {"lat": -22.9644, "lon": -43.2185}, # 3. Lagoa / Jardim Botânico
-    {"lat": -22.9839, "lon": -43.2173}, # 4. Leblon / Ipanema
-    {"lat": -22.8953, "lon": -43.2241}, # 5. São Cristóvão / Benfica
-    {"lat": -22.9250, "lon": -43.2350}, # 6. Tijuca / Maracanã
-    {"lat": -22.8916, "lon": -43.2800}, # 7. Méier / Cachambi
-    {"lat": -23.0003, "lon": -43.3659}, # 8. Barra da Tijuca (Início/Jardim Oceânico)
-    {"lat": -22.9841, "lon": -43.4150}, # 9. Barra da Tijuca (Via Parque/Alvorada)
-    {"lat": -23.0189, "lon": -43.4650}  # 10. Recreio dos Bandeirantes
-]
+def carregar_checkpoint():
+    if os.path.exists(CHECKPOINT_FILE):
+        try:
+            with open(CHECKPOINT_FILE, "r") as f:
+                data = json.load(f)
+                return set(data.get("ids", [])), data.get("ultimo_indice", -1)
+        except: pass
+    return set(), -1
 
-ids_processados = set()
-historico_postos = []
-dados_finais = []
+def salvar_checkpoint(ids_vistos, indice_atual):
+    with open(CHECKPOINT_FILE, "w") as f:
+        json.dump({"ids": list(ids_vistos), "ultimo_indice": indice_atual}, f)
 
-def coordenada_pertence_ao_rj(lat, lon):
-    return (RJ_BOUNDS['lat_min'] <= lat <= RJ_BOUNDS['lat_max'] and
-            RJ_BOUNDS['lon_min'] <= lon <= RJ_BOUNDS['lon_max'])
-
-def decimal_to_dms(lat, lon):
-    def convert(value, pos, neg):
-        direction = pos if value >= 0 else neg
-        value = abs(value)
-        degrees = int(value)
-        minutes_float = (value - degrees) * 60
-        minutes = int(minutes_float)
-        seconds = (minutes_float - minutes) * 60
-        return f'{degrees}º{minutes}\'{seconds:.2f}"{direction}'
-    return convert(lat, 'N', 'S'), convert(lon, 'E', 'W')
-
-def calcular_distancia_entre_postos(lat1, lon1, lat2, lon2):
-    R = 6371000 
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
-
-def verificar_proximidade_entre_postos(novo_id, novo_lat, novo_lon):
-    conflitos = []
-    limite_metros = 15.0
-    for posto in historico_postos:
-        if posto['id'] == novo_id: continue
-        distancia = calcular_distancia_entre_postos(novo_lat, novo_lon, posto['lat'], posto['lon'])
-        if distancia <= limite_metros:
-            conflitos.append(f"ID {posto['id']} ({distancia:.2f}m)")
-    return conflitos
-
-def processar_estacao(s):
-    try:
-        s_id = s.get('id')
-        lat_dec, lon_dec = s.get('latitude'), s.get('longitude')
-        lat_dms, lon_dms = decimal_to_dms(lat_dec, lon_dec)
-        
-        conflitos = verificar_proximidade_entre_postos(s_id, lat_dec, lon_dec)
-        obs_text = f"CONFLITO: {', '.join(conflitos)}" if conflitos else ""
-
-        conectores_count = {}
-        for st in s.get('stations', []):
-            for out in st.get('outlets', []):
-                c_id = out.get('connector')
-                nome_c = CONNECTOR_TYPES.get(c_id, f"Tipo {c_id}")
-                conectores_count[nome_c] = conectores_count.get(nome_c, 0) + 1
-
-        for tipo, qde in conectores_count.items():
-            dados_finais.append({
-                "Código": "",      
-                "Município": "",   
-                "Bairro": "",      
-                "ID": s_id,
-                "Nome": s.get('name'),
-                "Endereço": s.get('address', 'N/A'),
-                "Latitude": lat_dms,
-                "Longitude": lon_dms,
-                "Acesso": "Público" if s.get('access') == 1 else "Restrito",
-                "Tipo de Carregamento": tipo,
-                "Qde.": qde,
-                "Score": s.get('score', 0.0),
-                "OBS": obs_text
-            })
-        
-        historico_postos.append({'id': s_id, 'lat': lat_dec, 'lon': lon_dec, 'nome': s.get('name')})
-        ids_processados.add(s_id)
-    except Exception as e:
-        print(f"Erro ao processar posto {s.get('id')}: {e}")
-
-def executar_sessao(idx, lat, lon):
+def executar_sessao(lat, lon, ids_vistos, max_tentativas=3):
     tentativa = 1
-    while True:
-        print(f">>> Sessão {idx+1}/10 | Pos: {lat}, {lon} | Tentativa: {tentativa}")
+    
+    while tentativa <= max_tentativas:
+        estacoes_no_quadrante = []
         with sync_playwright() as p:
             browser = p.firefox.launch(headless=True)
             context = browser.new_context(
-                permissions=['geolocation'], 
-                geolocation={'latitude': lat, 'longitude': lon},
-                viewport={'width': 1280, 'height': 720}
+                viewport={'width': 1280, 'height': 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) Gecko/20100101 Firefox/115.0",
+                permissions=['geolocation'],
+                geolocation={'latitude': lat, 'longitude': lon}
             )
             page = context.new_page()
-            
-            # Bloqueia mídias para acelerar as 10 sessões
-            page.route("**/*.{png,jpg,jpeg,svg,css,woff2}", lambda r: r.abort())
+            page.route("**/*.{png,jpg,jpeg,svg,woff2}", lambda r: r.abort())
 
             def handle_response(response):
                 if "locations" in response.url and response.status == 200:
                     try:
-                        stations = response.json()
-                        if not isinstance(stations, list): return
+                        data = response.json()
+                        stations = data if isinstance(data, list) else []
                         for s in stations:
                             s_id = s.get('id')
-                            if s_id in ids_processados: continue
-                            
-                            s_lat, s_lon = s.get('latitude'), s.get('longitude')
-                            addr = str(s.get('address', '')).upper()
-                            
-                            if s.get('access') in [1, 2]:
-                                if (" RJ" in addr or "RIO DE JANEIRO" in addr) or coordenada_pertence_ao_rj(s_lat, s_lon):
-                                    processar_estacao(s)
+                            if s_id and s_id not in ids_vistos:
+                                addr = str(s.get('address', '')).upper()
+                                if " RIO DE JANEIRO" in addr or ", RJ" in addr:
+                                    estacoes_no_quadrante.append(s)
+                                    ids_vistos.add(s_id)
                     except: pass
 
             page.on("response", handle_response)
+
             try:
-                page.goto("https://www.plugshare.com/", wait_until="domcontentloaded", timeout=60000)
-                btn_cancel = page.get_by_role("button", name="cancel")
-                btn_cancel.wait_for(state="visible", timeout=20000)
-                btn_cancel.click()
+                url = f"https://www.plugshare.com/?lat={lat}&lng={lon}&z={ZOOM_LEVEL}"
+                page.goto(url, wait_until="commit", timeout=45000)
+
+                # --- FECHAMENTO OBRIGATÓRIO DO MODAL ---
+                try:
+                    btn = page.get_by_role("button", name="cancel")
+                    btn.wait_for(state="visible", timeout=12000) # Espera ser visível
+                    page.evaluate("el => el.click()", btn.element_handle())
+                    print(f"      [OK] Modal fechado na T{tentativa}.")
+                except Exception:
+                    # Se falhar o botão, tentamos Escape
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(2000)
+                    
+                    # Verificação Final: O modal ainda está lá?
+                    if page.get_by_role("button", name="cancel").is_visible():
+                        print(f"      [ERRO] Modal persistente na T{tentativa}!")
+                        raise RuntimeError("Modal não fechou") # Força a ida para o 'except' externo
+                    else:
+                        print(f"      [OK] Modal fechado via Escape na T{tentativa}.")
+
+                # --- GATILHO E COLETA ---
+                page.mouse.wheel(0, 100)
+                page.wait_for_timeout(1000)
+                page.mouse.wheel(0, -100)
+
+                start_wait = time.time()
+                while time.time() - start_wait < 10:
+                    if len(estacoes_no_quadrante) > 0: break
+                    page.wait_for_timeout(500)
                 
-                page.wait_for_timeout(15000) 
+                print(f"      [RESULTADO] {len(estacoes_no_quadrante)} novos postos.")
                 browser.close()
-                break 
+                return estacoes_no_quadrante # Sai do 'while' de tentativas com sucesso
+
             except Exception as e:
-                print(f"Falha na tentativa {tentativa}: Reiniciando sessão...")
+                print(f"      [RETRY] Tentativa {tentativa} falhou: {e}. Reiniciando...")
                 browser.close()
                 tentativa += 1
-                time.sleep(5)
+                time.sleep(3)
+                gc.collect()
 
-def exportar_dados():
-    if not dados_finais:
-        print("Nenhum dado coletado.")
-        return
+    return [] # Retorna vazio só se esgotar as 3 tentativas
+
+def processar_base(estacoes):
+    if not estacoes: return pd.DataFrame()
+    processados = []
+    for s in estacoes:
+        lat, lon = s.get('latitude'), s.get('longitude')
+        lat_dms, lon_dms = decimal_para_dms(lat, lon)
+        conns = {CONNECTOR_TYPES.get(o.get('connector'), "Outro") 
+                 for st in s.get('stations', []) for o in st.get('outlets', [])}
+        processados.append({
+            "ID": s.get('id'), "Nome": str(s.get('name')).upper(), "Score": s.get('score', 0),
+            "Endereco": str(s.get('address', '')).replace('\n', ' ').upper(),
+            "Conectores": ", ".join(conns), "Lat_DMS": lat_dms, "Lon_DMS": lon_dms,
+            "Latitude": lat, "Longitude": lon
+        })
+    return pd.DataFrame(processados)
+
+def main():
+    lats = [LAT_NORTE + (LAT_SUL - LAT_NORTE) * i / (DIVISOES_LAT - 1) for i in range(DIVISOES_LAT)]
+    lons = [LON_OESTE + (LON_LESTE - LON_OESTE) * i / (DIVISOES_LON - 1) for i in range(DIVISOES_LON)]
+    grade = [(round(lat, 6), round(lon, 6)) for lat in lats for lon in lons]
     
-    df = pd.DataFrame(dados_finais)
-    colunas = ["Código", "Município", "Bairro", "ID", "Nome", "Endereço", "Latitude", "Longitude", "Acesso", "Tipo de Carregamento", "Qde.", "Score", "OBS"]
-    df = df[colunas]
-    
-    filename = f"relatorio_eletropostos_rj_10_coordenadas.xlsx"
-    df.to_excel(filename, index=False, engine='openpyxl')
-    print(f"\nSucesso! Planilha gerada: {filename}")
-    print(f"Total de registros únicos coletados: {len(df)}")
+    ids_vistos, ultimo_idx = carregar_checkpoint()
+    acumulado_total = []
+
+    print(f"Iniciando Varredura CAPITAL RJ: {len(grade)} pontos.")
+
+    try:
+        for i, (lat, lon) in enumerate(grade):
+            if i <= ultimo_idx: continue
+            
+            print(f">>> Quadrante {i+1}/{len(grade)} | Total Únicos: {len(ids_vistos)}")
+            novos = executar_sessao(lat, lon, ids_vistos)
+            acumulado_total.extend(novos)
+            salvar_checkpoint(ids_vistos, i)
+            
+            if (i + 1) % 15 == 0:
+                processar_base(acumulado_total).to_excel(f"backup_capital_{i+1}.xlsx", index=False)
+                
+    except KeyboardInterrupt:
+        print("\nInterrompido.")
+    finally:
+        df = processar_base(acumulado_total)
+        if not df.empty:
+            df.to_excel("BASE_CAPITAL_RJ_FINAL.xlsx", index=False)
+            print(f"Finalizado. {len(df)} postos da Capital salvos.")
 
 if __name__ == "__main__":
-    start_total = time.time()
-    for idx, coord in enumerate(COORDENADAS_ALVO):
-        executar_sessao(idx, coord['lat'], coord['lon'])
-    exportar_dados()
-    print(f"Tempo total: {time.time() - start_total:.2f}s")
+    main()
