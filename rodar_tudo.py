@@ -6,12 +6,14 @@ import os
 # Importamos a função de consolidação
 try:
     #from consolidar_baixada import consolidar_baixada
-    from consolidar_capital import consolidar_capital
+    #from consolidar_capital import consolidar_capital
+    from consolidar_niteroi import consolidar_niteroi
 except ImportError:
     #print("[ERRO] Arquivo consolidar_baixada.py não encontrado!")
-    print("[ERRO] Arquivo consolidar_capital.py não encontrado!")
+    #print("[ERRO] Arquivo consolidar_capital.py não encontrado!")
+    print("[ERRO] Arquivo consolidar_niteroi.py não encontrado!")
 
-scripts = ["scan_capital.py"] # Foco total na Capital
+scripts = ["scan_niteroi.py"] # Foco total em Niterói
 
 def iniciar_maratona():
     print(f"--- Iniciando Maratona de Coleta ---")
@@ -35,7 +37,8 @@ def iniciar_maratona():
     print("INICIANDO CONSOLIDAÇÃO DOS DADOS")
     print("="*50)
     #consolidar_baixada()
-    consolidar_capital()
+    #consolidar_capital()
+    consolidar_niteroi()
 
 if __name__ == "__main__":
     iniciar_maratona()
