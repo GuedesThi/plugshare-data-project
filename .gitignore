@@ -1,3 +1,6 @@
 .venv
 __pycache__
 #*.xlsx
+scan_serra.py
+scan_sul.py
+scan_lagos.py

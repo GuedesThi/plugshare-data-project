@@ -1,7 +1,6 @@
 import subprocess
 import time
 import sys
-import os
 
 # Importamos a função de consolidação
 try:
