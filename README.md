@@ -45,7 +45,7 @@ source .venv/bin/activate
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
-3. Instale as dependências do arquivo ``requirements.txt`
+3. Instale as dependências do arquivo `requirements.txt`
 ```powershell
 pip install -r requirements.txt
 ```
